@@ -231,6 +231,21 @@ class Alati:
             return f"{type(e).__name__}: {e}", True
 
 
+def groq_seme(seme):
+    """Groq koristi OpenAI oblik: type=function, parameters umjesto input_schema."""
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": s["name"],
+                "description": s["description"],
+                "parameters": s["input_schema"],
+            },
+        }
+        for s in seme
+    ]
+
+
 # Opisi alata koje model vidi. Opis je dio prompta: što je jasniji, to bolje.
 TOOL_SCHEMAS = [
     {

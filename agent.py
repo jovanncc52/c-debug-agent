@@ -8,14 +8,15 @@ import sys
 import time
 from pathlib import Path
 
-import anthropic
+from groq import Groq, RateLimitError
 
 from sandbox import Sandbox
-from tools import Alati, TOOL_SCHEMAS
+from tools import Alati, TOOL_SCHEMAS, groq_seme
 
-MODEL = "claude-sonnet-5-5"
-MAX_KORAKA = 25            # budžet: koliko puta smijemo pozvati model
+MODEL = "openai/gpt-oss-120b"  # besplatni nivo na Groqu, podržava tool calling
+MAX_KORAKA = 25                 # budžet: koliko puta smijemo pozvati model
 MAX_TOKENA_ODGOVOR = 4096
+GROQ_ALATI = groq_seme(TOOL_SCHEMAS)
 
 SYSTEM = """Ti si agent za debagovanje C programa. Radiš u izolovanom sandboxu i \
 možeš koristiti samo date alate.
@@ -39,6 +40,35 @@ def pripremi_run(task_dir):
     run_dir = Path("runs") / f"{task_dir.name}-{time.strftime('%Y%m%d-%H%M%S')}"
     shutil.copytree(task_dir, run_dir / "work")
     return run_dir
+
+
+def pozovi_model(client, messages):
+    """Jedan poziv Groq chat API-ja. Na 429 sačeka i proba ponovo (besplatni limit)."""
+    for pokusaj in range(6):
+        try:
+            return client.chat.completions.create(
+                model=MODEL,
+                max_tokens=MAX_TOKENA_ODGOVOR,
+                messages=messages,
+                tools=GROQ_ALATI,
+                tool_choice="auto",
+            )
+        except RateLimitError:
+            if pokusaj == 5:
+                raise
+            print("Groq rate limit, čekam 30s...")
+            time.sleep(30)
+
+
+def argumenti_poziva(sirovo):
+    """function.arguments stiže kao JSON string. Loš JSON ide modelu kao greška."""
+    try:
+        argumenti = json.loads(sirovo or "{}")
+    except json.JSONDecodeError as e:
+        return None, f"Argumenti nisu ispravan JSON: {e}"
+    if not isinstance(argumenti, dict):
+        return None, "Argumenti moraju biti JSON objekat."
+    return argumenti, None
 
 
 def kratko(tekst, n=200):
@@ -91,11 +121,14 @@ def main():
     opis_fajl = workdir / "TASK.md"
     opis = opis_fajl.read_text() if opis_fajl.exists() else "(nema opisa, zaključi iz koda i testova)"
 
-    client = anthropic.Anthropic()  # čita ANTHROPIC_API_KEY iz okruženja
-    messages = [{
-        "role": "user",
-        "content": f"Opis zadatka:\n{opis}\n\nPopravi program tako da prolaze svi testovi u tests/.",
-    }]
+    client = Groq()  # čita GROQ_API_KEY iz okruženja
+    messages = [
+        {"role": "system", "content": SYSTEM},
+        {
+            "role": "user",
+            "content": f"Opis zadatka:\n{opis}\n\nPopravi program tako da prolaze svi testovi u tests/.",
+        },
+    ]
     trace = []
     ulazni_tokeni = izlazni_tokeni = 0
     korak = 0
@@ -105,53 +138,62 @@ def main():
         zavrseno = False
 
         for korak in range(1, MAX_KORAKA + 1):
-            odgovor = client.messages.create(
-                model=MODEL,
-                max_tokens=MAX_TOKENA_ODGOVOR,
-                system=SYSTEM,
-                tools=TOOL_SCHEMAS,
-                messages=messages,
-            )
-            ulazni_tokeni += odgovor.usage.input_tokens
-            izlazni_tokeni += odgovor.usage.output_tokens
+            odgovor = pozovi_model(client, messages)
+            poruka = odgovor.choices[0].message
+            if odgovor.usage:
+                ulazni_tokeni += odgovor.usage.prompt_tokens or 0
+                izlazni_tokeni += odgovor.usage.completion_tokens or 0
 
-            # Odgovor modela ide nazad u historiju tačno onakav kakav jeste.
-            messages.append({"role": "assistant", "content": odgovor.content})
-            trace.append({"korak": korak, "uloga": "assistant",
-                          "sadrzaj": [b.model_dump() for b in odgovor.content]})
+            pozivi = poruka.tool_calls or []
+            # Historija mora dobiti isti tool_calls koje je model vratio, pa da
+            # sljedeći "tool" odgovori imaju na šta da se vežu.
+            asistent = {"role": "assistant", "content": poruka.content or ""}
+            if pozivi:
+                asistent["tool_calls"] = [
+                    {
+                        "id": p.id,
+                        "type": "function",
+                        "function": {
+                            "name": p.function.name,
+                            "arguments": p.function.arguments,
+                        },
+                    }
+                    for p in pozivi
+                ]
+            messages.append(asistent)
+            trace.append({"korak": korak, "uloga": "assistant", "sadrzaj": asistent})
 
-            for blok in odgovor.content:
-                if blok.type == "text" and blok.text.strip():
-                    print(f"\n[{korak}] MISLI: {blok.text.strip()}")
+            if poruka.content and poruka.content.strip():
+                print(f"\n[{korak}] MISLI: {poruka.content.strip()}")
 
-            if odgovor.stop_reason != "tool_use":
-                print(f"\nAgent je stao bez poziva alata (stop_reason={odgovor.stop_reason}).")
+            if not pozivi:
+                razlog = odgovor.choices[0].finish_reason
+                print(f"\nAgent je stao bez poziva alata (finish_reason={razlog}).")
                 break
 
-            # Izvrši sve pozive alata iz ovog odgovora.
-            rezultati = []
-            for blok in odgovor.content:
-                if blok.type != "tool_use":
-                    continue
-                tekst, greska = alati.pozovi(blok.name, blok.input)
-                print(f"[{korak}] ALAT: {blok.name}({kratko(json.dumps(blok.input, ensure_ascii=False), 120)})")
+            for p in pozivi:
+                argumenti, greska_json = argumenti_poziva(p.function.arguments)
+                if greska_json:
+                    tekst, greska = greska_json, True
+                    argumenti = {}
+                else:
+                    tekst, greska = alati.pozovi(p.function.name, argumenti)
+                print(f"[{korak}] ALAT: {p.function.name}({kratko(json.dumps(argumenti, ensure_ascii=False), 120)})")
                 print(f"      {'GREŠKA' if greska else '->'} {kratko(tekst)}")
 
-                rezultati.append({
-                    "type": "tool_result",
-                    "tool_use_id": blok.id,   # povezuje rezultat s pozivom
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": p.id,
+                    "name": p.function.name,
                     "content": tekst,
-                    "is_error": greska,
                 })
-                trace.append({"korak": korak, "uloga": "alat", "ime": blok.name,
-                              "ulaz": blok.input, "izlaz": tekst, "greska": greska})
+                trace.append({"korak": korak, "uloga": "alat", "ime": p.function.name,
+                              "ulaz": argumenti, "izlaz": tekst, "greska": greska})
 
-                if blok.name == "finish":
+                if p.function.name == "finish":
                     zavrseno = True
-                    print(f"\nSAŽETAK AGENTA:\n{blok.input.get('summary', '')}")
+                    print(f"\nSAŽETAK AGENTA:\n{argumenti.get('summary', '')}")
 
-            # Rezultati alata se šalju kao "user" poruka.
-            messages.append({"role": "user", "content": rezultati})
             if zavrseno:
                 break
         else:
