@@ -86,6 +86,20 @@ def argumenti_poziva(sirovo):
     return argumenti, None
 
 
+def svi_testovi_prosli(trace):
+    """Zadnji run_tests kaže 'Prošlo N/N'."""
+    for stavka in reversed(trace):
+        if stavka.get("uloga") != "alat" or stavka.get("ime") != "run_tests":
+            continue
+        prva = (stavka.get("izlaz") or "").splitlines()
+        if not prva or not prva[0].startswith("Prošlo "):
+            return False
+        omjer = prva[0].split()[1]
+        lijevo, desno = omjer.split("/", 1)
+        return lijevo == desno
+    return False
+
+
 def kratko(tekst, n=200):
     tekst = str(tekst).replace("\n", " ")
     return tekst if len(tekst) <= n else tekst[:n] + "..."
@@ -163,6 +177,7 @@ def main():
         with Sandbox(workdir) as sb:
             alati = Alati(sb, workdir)
             zavrseno = False
+            podsjetio_finish = False
 
             try:
                 for korak in range(1, MAX_KORAKA + 1):
@@ -225,6 +240,24 @@ def main():
 
                     if not pozivi:
                         razlog = odgovor.choices[0].finish_reason
+                        if not podsjetio_finish and svi_testovi_prosli(trace):
+                            podsjetio_finish = True
+                            print("\nTestovi prolaze, a finish nije pozvan. Tražim sažetak.")
+                            messages.append({
+                                "role": "user",
+                                "content": (
+                                    "Svi testovi prolaze, ali nisi pozvao finish. "
+                                    "Pozovi finish i u summary napiši koje si bugove popravio. "
+                                    "Ne odgovaraj samo tekstom."
+                                ),
+                            })
+                            trace.append({
+                                "korak": korak,
+                                "uloga": "podsjetnik",
+                                "tekst": "finish nije pozvan iako testovi prolaze",
+                            })
+                            sacuvaj_trace(run_dir, trace)
+                            continue
                         print(f"\nAgent je stao bez poziva alata (finish_reason={razlog}).")
                         sacuvaj_trace(run_dir, trace)
                         break

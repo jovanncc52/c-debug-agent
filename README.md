@@ -35,7 +35,7 @@ Kad pokreneš `python agent.py zadaci/seznam`, redoslijed je ovaj:
    - model vrati rečenicu (`[1] MISLI:`) i/ili zahtjev za alatom (`[1] ALAT:`);
    - `tools.py` izvrši alat (čitanje fajla je na disku, `compile` i testovi idu kroz Docker);
    - rezultat alata se vrati modelu kao sljedeća poruka.
-5. Petlja stane kad model pozove `finish`, kad prestane zvati alate, ili kad potroši 25 koraka.
+5. Petlja stane kad model pozove `finish`, kad prestane zvati alate, ili kad potroši 25 koraka. Ako `run_tests` javi da sve prolazi, a model samo napiše tekst i ne pozove `finish`, petlja mu jednom kaže da pozove `finish`. Taj sažetak je ono što završi u `izvjestaj.md`.
 6. Skripta sama obriše `prog`, ponovo kompajlira i ponovo pusti sve testove. Ne vjeruje modelu da je "gotovo".
 7. U `runs/seznam-<vrijeme>/` upiše `trace.json`, `rezultat.json` i `izvjestaj.md`. Popravljeni kod je u `work/`. `trace.json` se upisuje poslije svakog koraka, ne tek na kraju. Ako Groq vrati `tool_use_failed` (model je poslao loš tool call), agent mu kaže da proba ponovo i nastavlja. Druga API greška prekida petlju, ali se trace, rezultat i izvještaj ipak upišu.
 
@@ -80,3 +80,19 @@ leak (AddressSanitizer) ruše test čak i kad je izlaz tačan.
 poseban binarni fajl u `/tmp` (valgrind i ASan se ne slažu) i vraća skraćen
 izvještaj za jedan test. `gdb_backtrace` pokreće već kompajlirani `./prog` u
 `gdb -batch` i vraća backtrace ako program padne.
+
+## Primjer: seznam
+
+Jedan ručni run, `runs/seznam-20261011-132659`, sačuvan u `primjeri/seznam/`.
+Model `openai/gpt-oss-120b`. Harness je sam potvrdio **5/5** testova, u 10 koraka
+(22653 ulaznih tokena, 1437 izlaznih).
+
+Tri izmjene u `primjeri/seznam/main.c`, original u `zadaci/seznam/main.c` je i dalje pokvaren:
+
+1. U `odstraniSode` se `next` sačuva prije `free(tren)`, pa se petlja nastavlja sa `tren = next`.
+2. Petlja čitanja je `for (i = 0; i < n; i++)`, tako da se pročita svih `n` brojeva.
+3. `main` pozove `sprosti(glava)` prije `return`.
+
+U tom runu model je sažetak napisao kao običan tekst i nije pozvao `finish`,
+pa `primjeri/seznam/izvjestaj.md` nema sažetak. Sažetak je u `trace.json`, korak 10.
+Petlja sad na to jednom odgovori zahtjevom da se pozove `finish`.
