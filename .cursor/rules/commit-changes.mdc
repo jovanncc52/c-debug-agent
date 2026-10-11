@@ -1,13 +1,15 @@
 ---
-description: Commit every completed code or doc change in this repo without waiting to be asked
+description: For every finished change, commit on a branch and open a pull request
 alwaysApply: true
 ---
 
-# Commit after each change
+# Commit and create a PR
 
-When a change in this repo is finished and correct, commit it in the same turn. Do not wait for the user to ask.
+When a change in this repo is finished and correct, commit it and open a pull request in the same turn. Do not wait for the user to ask. Do not commit directly to `main`.
 
+- Start from the latest `main`. Create a new branch for that change.
 - One commit per logical change. Follow the repo's git commit rules (no config changes, no `--no-verify`, no force-push, no amend unless the user asked).
 - Stage only the files that belong to that change. Leave secrets untracked.
 - Commit message: one or two sentences on why.
-- Push only when the user asks.
+- Push the branch and open a PR into `main` with `gh pr create`. In the body, say why the change exists and how to check it.
+- Return the PR URL.
