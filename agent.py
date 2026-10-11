@@ -8,14 +8,15 @@ import sys
 import time
 from pathlib import Path
 
-import anthropic
+from groq import APIError, BadRequestError, Groq, RateLimitError
 
 from sandbox import Sandbox
-from tools import Alati, TOOL_SCHEMAS
+from tools import Alati, TOOL_SCHEMAS, groq_seme
 
-MODEL = "claude-sonnet-5-5"
-MAX_KORAKA = 25            # budžet: koliko puta smijemo pozvati model
+MODEL = "openai/gpt-oss-120b"  # besplatni nivo na Groqu, podržava tool calling
+MAX_KORAKA = 25                 # budžet: koliko puta smijemo pozvati model
 MAX_TOKENA_ODGOVOR = 4096
+GROQ_ALATI = groq_seme(TOOL_SCHEMAS)
 
 SYSTEM = """Ti si agent za debagovanje C programa. Radiš u izolovanom sandboxu i \
 možeš koristiti samo date alate.
@@ -41,6 +42,50 @@ def pripremi_run(task_dir):
     return run_dir
 
 
+def je_tool_use_failed(greska):
+    """gpt-oss ponekad vrati 400 tool_use_failed umjesto normalnog tool call-a."""
+    tijelo = getattr(greska, "body", None) or {}
+    if isinstance(tijelo, dict):
+        err = tijelo.get("error") or {}
+        if isinstance(err, dict) and err.get("code") == "tool_use_failed":
+            return True
+    return "tool_use_failed" in str(greska)
+
+
+def sacuvaj_trace(run_dir, trace):
+    """Poslije svakog koraka, da pad ili Ctrl+C ne pobriše historiju."""
+    (run_dir / "trace.json").write_text(json.dumps(trace, indent=2, ensure_ascii=False))
+
+
+def pozovi_model(client, messages):
+    """Jedan poziv Groq chat API-ja. Na 429 sačeka i proba ponovo (besplatni limit)."""
+    for pokusaj in range(6):
+        try:
+            return client.chat.completions.create(
+                model=MODEL,
+                max_tokens=MAX_TOKENA_ODGOVOR,
+                messages=messages,
+                tools=GROQ_ALATI,
+                tool_choice="auto",
+            )
+        except RateLimitError:
+            if pokusaj == 5:
+                raise
+            print("Groq rate limit, čekam 30s...")
+            time.sleep(30)
+
+
+def argumenti_poziva(sirovo):
+    """function.arguments stiže kao JSON string. Loš JSON ide modelu kao greška."""
+    try:
+        argumenti = json.loads(sirovo or "{}")
+    except json.JSONDecodeError as e:
+        return None, f"Argumenti nisu ispravan JSON: {e}"
+    if not isinstance(argumenti, dict):
+        return None, "Argumenti moraju biti JSON objekat."
+    return argumenti, None
+
+
 def kratko(tekst, n=200):
     tekst = str(tekst).replace("\n", " ")
     return tekst if len(tekst) <= n else tekst[:n] + "..."
@@ -61,9 +106,17 @@ def napisi_izvjestaj(run_dir, rezultat, trace):
     linije = [
         f"# Izvještaj: {rezultat['zadatak']}",
         "",
-        f"- Testovi: {rezultat['prosli']}/{rezultat['ukupno']}",
+        (
+            f"- Testovi: {rezultat['prosli']}/{rezultat['ukupno']}"
+            if rezultat.get("prosli") is not None
+            else "- Testovi: nisu provjereni"
+        ),
         f"- Koraci: {rezultat['koraci']} / {MAX_KORAKA}",
         f"- Tokeni: {rezultat['ulazni_tokeni']} ulaz, {rezultat['izlazni_tokeni']} izlaz",
+        "",
+        "## Prekid",
+        "",
+        (rezultat.get("prekid") or "").strip() or "(nema, run je došao do kraja)",
         "",
         "## Sažetak agenta",
         "",
@@ -91,91 +144,160 @@ def main():
     opis_fajl = workdir / "TASK.md"
     opis = opis_fajl.read_text() if opis_fajl.exists() else "(nema opisa, zaključi iz koda i testova)"
 
-    client = anthropic.Anthropic()  # čita ANTHROPIC_API_KEY iz okruženja
-    messages = [{
-        "role": "user",
-        "content": f"Opis zadatka:\n{opis}\n\nPopravi program tako da prolaze svi testovi u tests/.",
-    }]
+    client = Groq()  # čita GROQ_API_KEY iz okruženja
+    messages = [
+        {"role": "system", "content": SYSTEM},
+        {
+            "role": "user",
+            "content": f"Opis zadatka:\n{opis}\n\nPopravi program tako da prolaze svi testovi u tests/.",
+        },
+    ]
     trace = []
     ulazni_tokeni = izlazni_tokeni = 0
     korak = 0
+    prosli = ukupno = None
+    prekid = None
+    sacuvaj_trace(run_dir, trace)
 
-    with Sandbox(workdir) as sb:
-        alati = Alati(sb, workdir)
-        zavrseno = False
+    try:
+        with Sandbox(workdir) as sb:
+            alati = Alati(sb, workdir)
+            zavrseno = False
 
-        for korak in range(1, MAX_KORAKA + 1):
-            odgovor = client.messages.create(
-                model=MODEL,
-                max_tokens=MAX_TOKENA_ODGOVOR,
-                system=SYSTEM,
-                tools=TOOL_SCHEMAS,
-                messages=messages,
-            )
-            ulazni_tokeni += odgovor.usage.input_tokens
-            izlazni_tokeni += odgovor.usage.output_tokens
+            try:
+                for korak in range(1, MAX_KORAKA + 1):
+                    try:
+                        odgovor = pozovi_model(client, messages)
+                    except RateLimitError as e:
+                        prekid = f"Groq rate limit i poslije čekanja: {e}"
+                        print(f"\n{prekid}")
+                        break
+                    except BadRequestError as e:
+                        if je_tool_use_failed(e):
+                            tekst = kratko(e, 500)
+                            print(f"\n[{korak}] GROQ je odbio tool call (tool_use_failed). Tražim novi poziv.")
+                            messages.append({
+                                "role": "user",
+                                "content": (
+                                    "Tvoj zadnji poziv alata je odbijen (tool_use_failed). "
+                                    "Pozovi alat ponovo, s ispravnim JSON argumentima.\n"
+                                    + tekst
+                                ),
+                            })
+                            trace.append({"korak": korak, "uloga": "greska",
+                                          "tekst": f"tool_use_failed: {tekst}"})
+                            sacuvaj_trace(run_dir, trace)
+                            continue
+                        prekid = f"Groq 400: {e}"
+                        print(f"\n{prekid}")
+                        break
+                    except APIError as e:
+                        prekid = f"Groq API: {e}"
+                        print(f"\n{prekid}")
+                        break
 
-            # Odgovor modela ide nazad u historiju tačno onakav kakav jeste.
-            messages.append({"role": "assistant", "content": odgovor.content})
-            trace.append({"korak": korak, "uloga": "assistant",
-                          "sadrzaj": [b.model_dump() for b in odgovor.content]})
+                    poruka = odgovor.choices[0].message
+                    if odgovor.usage:
+                        ulazni_tokeni += odgovor.usage.prompt_tokens or 0
+                        izlazni_tokeni += odgovor.usage.completion_tokens or 0
 
-            for blok in odgovor.content:
-                if blok.type == "text" and blok.text.strip():
-                    print(f"\n[{korak}] MISLI: {blok.text.strip()}")
+                    pozivi = poruka.tool_calls or []
+                    # Historija mora dobiti isti tool_calls koje je model vratio, pa da
+                    # sljedeći "tool" odgovori imaju na šta da se vežu.
+                    asistent = {"role": "assistant", "content": poruka.content or ""}
+                    if pozivi:
+                        asistent["tool_calls"] = [
+                            {
+                                "id": p.id,
+                                "type": "function",
+                                "function": {
+                                    "name": p.function.name,
+                                    "arguments": p.function.arguments,
+                                },
+                            }
+                            for p in pozivi
+                        ]
+                    messages.append(asistent)
+                    trace.append({"korak": korak, "uloga": "assistant", "sadrzaj": asistent})
 
-            if odgovor.stop_reason != "tool_use":
-                print(f"\nAgent je stao bez poziva alata (stop_reason={odgovor.stop_reason}).")
-                break
+                    if poruka.content and poruka.content.strip():
+                        print(f"\n[{korak}] MISLI: {poruka.content.strip()}")
 
-            # Izvrši sve pozive alata iz ovog odgovora.
-            rezultati = []
-            for blok in odgovor.content:
-                if blok.type != "tool_use":
-                    continue
-                tekst, greska = alati.pozovi(blok.name, blok.input)
-                print(f"[{korak}] ALAT: {blok.name}({kratko(json.dumps(blok.input, ensure_ascii=False), 120)})")
-                print(f"      {'GREŠKA' if greska else '->'} {kratko(tekst)}")
+                    if not pozivi:
+                        razlog = odgovor.choices[0].finish_reason
+                        print(f"\nAgent je stao bez poziva alata (finish_reason={razlog}).")
+                        sacuvaj_trace(run_dir, trace)
+                        break
 
-                rezultati.append({
-                    "type": "tool_result",
-                    "tool_use_id": blok.id,   # povezuje rezultat s pozivom
-                    "content": tekst,
-                    "is_error": greska,
-                })
-                trace.append({"korak": korak, "uloga": "alat", "ime": blok.name,
-                              "ulaz": blok.input, "izlaz": tekst, "greska": greska})
+                    for p in pozivi:
+                        argumenti, greska_json = argumenti_poziva(p.function.arguments)
+                        if greska_json:
+                            tekst, greska = greska_json, True
+                            argumenti = {}
+                        else:
+                            tekst, greska = alati.pozovi(p.function.name, argumenti)
+                        print(f"[{korak}] ALAT: {p.function.name}({kratko(json.dumps(argumenti, ensure_ascii=False), 120)})")
+                        print(f"      {'GREŠKA' if greska else '->'} {kratko(tekst)}")
 
-                if blok.name == "finish":
-                    zavrseno = True
-                    print(f"\nSAŽETAK AGENTA:\n{blok.input.get('summary', '')}")
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": p.id,
+                            "name": p.function.name,
+                            "content": tekst,
+                        })
+                        trace.append({"korak": korak, "uloga": "alat", "ime": p.function.name,
+                                      "ulaz": argumenti, "izlaz": tekst, "greska": greska})
 
-            # Rezultati alata se šalju kao "user" poruka.
-            messages.append({"role": "user", "content": rezultati})
-            if zavrseno:
-                break
-        else:
-            print(f"\nPotrošen budžet od {MAX_KORAKA} koraka.")
+                        if p.function.name == "finish":
+                            zavrseno = True
+                            print(f"\nSAŽETAK AGENTA:\n{argumenti.get('summary', '')}")
 
-        # Konačna provjera: ne vjerujemo agentu na riječ, sami kompajliramo i testiramo.
-        (workdir / "prog").unlink(missing_ok=True)
-        alati.compile()
-        prosli, ukupno, _ = alati.pokreni_testove()
+                    sacuvaj_trace(run_dir, trace)
+                    if zavrseno:
+                        break
+                else:
+                    print(f"\nPotrošen budžet od {MAX_KORAKA} koraka.")
+            except KeyboardInterrupt:
+                prekid = "prekinuto (Ctrl+C)"
+                print("\nPrekinuto. Spremam ono što je do sad urađeno.")
 
-    rezultat = {
-        "zadatak": Path(sys.argv[1]).name,
-        "prosli": prosli,
-        "ukupno": ukupno,
-        "koraci": korak,
-        "ulazni_tokeni": ulazni_tokeni,
-        "izlazni_tokeni": izlazni_tokeni,
-    }
-    (run_dir / "trace.json").write_text(json.dumps(trace, indent=2, ensure_ascii=False))
-    (run_dir / "rezultat.json").write_text(json.dumps(rezultat, indent=2, ensure_ascii=False))
-    izvjestaj = napisi_izvjestaj(run_dir, rezultat, trace)
+            # Konačna provjera: ne vjerujemo agentu na riječ, sami kompajliramo i testiramo.
+            if prekid != "prekinuto (Ctrl+C)":
+                try:
+                    (workdir / "prog").unlink(missing_ok=True)
+                    alati.compile()
+                    prosli, ukupno, _ = alati.pokreni_testove()
+                except Exception as e:
+                    dodatak = f"konačna provjera nije uspjela: {type(e).__name__}: {e}"
+                    prekid = f"{prekid}; {dodatak}" if prekid else dodatak
+                    print(f"\n{dodatak}")
+    except KeyboardInterrupt:
+        prekid = "prekinuto (Ctrl+C)"
+        print("\nPrekinuto. Spremam ono što je do sad urađeno.")
+    except Exception as e:
+        prekid = prekid or f"{type(e).__name__}: {e}"
+        print(f"\nGreška: {prekid}")
+    finally:
+        rezultat = {
+            "zadatak": Path(sys.argv[1]).name,
+            "prosli": prosli,
+            "ukupno": ukupno,
+            "koraci": korak,
+            "ulazni_tokeni": ulazni_tokeni,
+            "izlazni_tokeni": izlazni_tokeni,
+            "prekid": prekid,
+        }
+        sacuvaj_trace(run_dir, trace)
+        (run_dir / "rezultat.json").write_text(json.dumps(rezultat, indent=2, ensure_ascii=False))
+        izvjestaj = napisi_izvjestaj(run_dir, rezultat, trace)
 
     print("\n" + "=" * 50)
-    print(f"Rezultat: {prosli}/{ukupno} testova prolazi")
+    if prosli is None:
+        print("Rezultat: testovi nisu provjereni")
+    else:
+        print(f"Rezultat: {prosli}/{ukupno} testova prolazi")
+    if prekid:
+        print(f"Prekid: {prekid}")
     print(f"Koraci: {korak}, tokeni: {ulazni_tokeni} ulaz / {izlazni_tokeni} izlaz")
     print(f"Trace, izvještaj i popravljen kod: {run_dir}")
     print()

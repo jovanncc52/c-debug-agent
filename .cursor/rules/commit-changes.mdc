@@ -1,0 +1,13 @@
+---
+description: Commit every completed code or doc change in this repo without waiting to be asked
+alwaysApply: true
+---
+
+# Commit after each change
+
+When a change in this repo is finished and correct, commit it in the same turn. Do not wait for the user to ask.
+
+- One commit per logical change. Follow the repo's git commit rules (no config changes, no `--no-verify`, no force-push, no amend unless the user asked).
+- Stage only the files that belong to that change. Leave secrets untracked.
+- Commit message: one or two sentences on why.
+- Push only when the user asks.
