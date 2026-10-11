@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+runs/
+.DS_Store
+prog
+prog_vg
