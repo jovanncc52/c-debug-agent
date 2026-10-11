@@ -37,7 +37,7 @@ Kad pokreneš `python agent.py zadaci/seznam`, redoslijed je ovaj:
    - rezultat alata se vrati modelu kao sljedeća poruka.
 5. Petlja stane kad model pozove `finish`, kad prestane zvati alate, ili kad potroši 25 koraka.
 6. Skripta sama obriše `prog`, ponovo kompajlira i ponovo pusti sve testove. Ne vjeruje modelu da je "gotovo".
-7. U `runs/seznam-<vrijeme>/` upiše `trace.json`, `rezultat.json` i `izvjestaj.md`. Popravljeni kod je u `work/`.
+7. U `runs/seznam-<vrijeme>/` upiše `trace.json`, `rezultat.json` i `izvjestaj.md`. Popravljeni kod je u `work/`. `trace.json` se upisuje poslije svakog koraka, ne tek na kraju. Ako Groq vrati `tool_use_failed` (model je poslao loš tool call), agent mu kaže da proba ponovo i nastavlja. Druga API greška prekida petlju, ali se trace, rezultat i izvještaj ipak upišu.
 
 Ako terminal ispiše `Groq rate limit, čekam 30s...`, to je besplatni limit (oko 8000 tokena u minuti). Skripta čeka i nastavlja sama.
 
