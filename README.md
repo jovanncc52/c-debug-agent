@@ -169,28 +169,25 @@ Svaki zadatak osim `seznam` ima tačno jedan ubačen bug, i bar jedan test koji 
 
 ### Rezultati
 
-Jedan run po zadatku, model `openai/gpt-oss-120b`, 11. i 12. oktobra 2026.
-"Testovi" je konačna provjera harnessa, ne ono što je model tvrdio.
+Puni `python3 eval.py`, model `openai/gpt-oss-120b`, 12. oktobra 2026
+(`runs/eval-20261012-195535.json`). "Testovi" je konačna provjera harnessa, ne
+ono što je model tvrdio.
 
 | Zadatak | Testovi | Koraci | Tokeni (ulaz / izlaz) | Pozvao `finish` |
 |---|---|---|---|---|
-| `seznam` | 5/5 | 10 | 22653 / 1437 | ne |
-| `zbroj` | 2/2 | 8 | 9327 / 822 | da |
-| `maksimum` | 2/2 | 16 | 24921 / 1617 | ne |
-| `neparni` | 2/2 | 10 | 12239 / 544 | da |
-| `lista-duzina` | 2/2 | 9 | 14803 / 723 | da |
-| `lista-oslobodi` | 2/2 | 7 | 10617 / 476 | da |
-| **Ukupno** | **6/6** | | **94560 / 5619** | |
+| `seznam` | 5/5 | 15 | 54346 / 2575 | da |
+| `zbroj` | 2/2 | 8 | 9558 / 967 | da |
+| `maksimum` | 2/2 | 20 | 38265 / 2631 | da |
+| `neparni` | 2/2 | 9 | 10891 / 619 | da |
+| `lista-duzina` | 2/2 | 11 | 22538 / 1025 | da |
+| `lista-oslobodi` | 2/2 | 20 | 70077 / 11552 | da |
+| **Ukupno** | **6/6** | | **205675 / 19369** | |
 
-Svaki popravljen `work/main.c` je ručno upoređen s originalom: izmijenjene su samo
-linije s bugom, nijedan program nije prepisan.
-
-Tabela iznad su ručni runovi, jedan po zadatak, onaj koji je prošao. To nije
-jedini ishod. `eval.py` je kasnije, 12. oktobra, na `zbroj` prvo dobio **0/2**:
-model je poslije `compile` stao (`finish_reason=stop`) i nije ni pokrenuo testove.
-Drugi, puni `eval.py` je prošao **6/6**, ali s drugim brojevima. `lista-oslobodi`
-je tada potrošio oko 70000 ulaznih tokena u 20 koraka, a u tabeli iznad 10617 u 7.
-Isti bug, isti model, različit run.
+To nije jedini ishod. Isti dan je `eval.py zbroj` prvo dobio **0/2**: model je
+poslije `compile` stao (`finish_reason=stop`) i nije pokrenuo testove. Raniji
+ručni runovi, koji su prošli, bili su jeftiniji. `lista-oslobodi` je tada bio
+7 koraka i 10617 / 476 tokena, ovdje 20 koraka i 70077 / 11552. Isti bug, isti
+model, različit run.
 
 ## Šta radi, a šta ne
 
@@ -206,16 +203,17 @@ odmah zatim 0/2, jer je prestao zvati alate prije testa. Podsjetnik za `finish`
 se pali samo ako je zadnji `run_tests` već `N/N`. Ako model stane ranije, petlja
 ga ne gura dalje.
 
-`maksimum` je prošao testove, a zapis je loš. Trebalo je jednu izmjenu. Model je
-`replace_in_file` zvao šest puta: jednom je zamijenio `maks = 0` istim tekstom,
-jednom je obrisao `#include <stdio.h>`, jednom je `old` bio tekst kojeg u fajlu
-nema. Na kraju je stavio `maks = INT_MIN`. Za ove testove to jeste tačno (svaki
-`int` je veći od `INT_MIN`), ali nije ista popravka kao uzeti prvi broj. Kad su
-testovi prošli, podsjetnik jeste upalio, a model je sažetak napisao kao JSON u
-običnom tekstu i nije pozvao alat `finish`. `izvjestaj.md` zato kaže da sažetka
-nema, iako rečenica postoji u terminalu. Na `neparni` i `lista-oslobodi` isti
-podsjetnik jeste završio pravim `finish`. Jedan podsjetnik nije dovoljan kad
-model i dalje odgovara tekstom.
+`maksimum` u ručnom runu od 11. oktobra je prošao testove, a zapis je loš.
+Trebalo je jednu izmjenu. Model je `replace_in_file` zvao šest puta: jednom je
+zamijenio `maks = 0` istim tekstom, jednom je obrisao `#include <stdio.h>`,
+jednom je `old` bio tekst kojeg u fajlu nema. Na kraju je stavio `maks = INT_MIN`.
+Za ove testove to jeste tačno (svaki `int` je veći od `INT_MIN`), ali nije ista
+popravka kao uzeti prvi broj. Kad su testovi prošli, podsjetnik jeste upalio, a
+model je sažetak napisao kao JSON u običnom tekstu i nije pozvao alat `finish`.
+`izvjestaj.md` zato kaže da sažetka nema, iako rečenica postoji u terminalu. U
+tabeli iznad, iz punog `eval.py`, `maksimum` jeste pozvao `finish`. Na `neparni`
+i `lista-oslobodi` isti podsjetnik jeste završio pravim `finish` i u ručnom
+runu. Jedan podsjetnik nije dovoljan kad model i dalje odgovara tekstom.
 
 **Šta bih mijenjao.** Ako model stane a testovi još ne prolaze, petlja treba
 jednom da kaže "nastavi, pokreni testove", ne samo kad su već prošli. Ako poslije
