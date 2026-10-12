@@ -185,14 +185,60 @@ Jedan run po zadatku, model `openai/gpt-oss-120b`, 11. i 12. oktobra 2026.
 Svaki popravljen `work/main.c` je ručno upoređen s originalom: izmijenjene su samo
 linije s bugom, nijedan program nije prepisan.
 
-Šta se vidi iz runova:
+Tabela iznad su ručni runovi, jedan po zadatak, onaj koji je prošao. To nije
+jedini ishod. `eval.py` je kasnije, 12. oktobra, na `zbroj` prvo dobio **0/2**:
+model je poslije `compile` stao (`finish_reason=stop`) i nije ni pokrenuo testove.
+Drugi, puni `eval.py` je prošao **6/6**, ali s drugim brojevima. `lista-oslobodi`
+je tada potrošio oko 70000 ulaznih tokena u 20 koraka, a u tabeli iznad 10617 u 7.
+Isti bug, isti model, različit run.
 
-- Jednostavne greške s jednim bugom agent popravi pouzdano, za 7 do 16 koraka.
-- Slaba tačka je tool calling, ne razumijevanje koda. U `maksimum` model je trebao
-  6 pokušaja `replace_in_file` za jednu izmjenu (tekst `old` nije odgovarao), a
-  sažetak je na kraju napisao kao JSON u običnom tekstu umjesto da pozove `finish`.
-- Cijena jako zavisi od toga koliko puta model pogriješi: `maksimum` je potrošio
-  skoro tri puta više tokena od `zbroj`, za isto jednostavan bug.
+## Šta radi, a šta ne
+
+**Radi.** Petlja, sandbox i konačna provjera rade odvojeno od modela. Harness sam
+kompajlira i testira, pa "sve prolazi" u tekstu ne ulazi u tabelu. Na jednom
+bugu agent obično nađe liniju, zamijeni je i prođe testove za manje od 25 koraka.
+`zbroj`, `neparni` i `lista-oslobodi` u ručnim runovima su bili jedna izmjena.
+`seznam` je u jednom runu sredio sva tri buga. `eval.py` jednom zaredom dobije
+6/6.
+
+**Pada, i zašto.** Model nije stabilan. `zbroj` je jednom 2/2, a kroz `eval.py`
+odmah zatim 0/2, jer je prestao zvati alate prije testa. Podsjetnik za `finish`
+se pali samo ako je zadnji `run_tests` već `N/N`. Ako model stane ranije, petlja
+ga ne gura dalje.
+
+`maksimum` je prošao testove, a zapis je loš. Trebalo je jednu izmjenu. Model je
+`replace_in_file` zvao šest puta: jednom je zamijenio `maks = 0` istim tekstom,
+jednom je obrisao `#include <stdio.h>`, jednom je `old` bio tekst kojeg u fajlu
+nema. Na kraju je stavio `maks = INT_MIN`. Za ove testove to jeste tačno (svaki
+`int` je veći od `INT_MIN`), ali nije ista popravka kao uzeti prvi broj. Kad su
+testovi prošli, podsjetnik jeste upalio, a model je sažetak napisao kao JSON u
+običnom tekstu i nije pozvao alat `finish`. `izvjestaj.md` zato kaže da sažetka
+nema, iako rečenica postoji u terminalu. Na `neparni` i `lista-oslobodi` isti
+podsjetnik jeste završio pravim `finish`. Jedan podsjetnik nije dovoljan kad
+model i dalje odgovara tekstom.
+
+**Šta bih mijenjao.** Ako model stane a testovi još ne prolaze, petlja treba
+jednom da kaže "nastavi, pokreni testove", ne samo kad su već prošli. Ako poslije
+podsjetnika opet nema `finish`, sažetak iz tog teksta treba upisati u izvještaj,
+da se ne izgubi. Stare rezultate alata treba skratiti: cijela historija ide u
+svaki poziv, i zato jedan loš `lista-oslobodi` pojede 70000 ulaznih tokena.
+Više zadataka dolazi poslije toga. Neće popraviti ni nestabilnost ni tokene.
+
+## Ručna provjera u Dockeru nije isto što i `run_tests`
+
+Agent testove traži samo u `tests/`. `01.in` pored `main.c` ne postoji za njega:
+`run_tests` nađe nula testova i javi 0/0. Ista zamka je u ručnoj komandi
+`./prog < tests/01.in`. Kod `lista-oslobodi` su ulazi prvo ležali pored `main.c`,
+pa ni Docker ni agent nisu imali šta da pokrenu dok nisu pomjereni u `tests/`.
+
+Druga rupa je sam `docker run` kad LeakSanitizer prekine program. `printf` drži
+liniju u baferu. Proces umre prije nego što se bafer isprazni u fajl, pa
+`/tmp/got` ostane prazan i `diff` izgleda kao da program nije ništa ispisao
+(`-7 3 9 1` u očekivanom, ništa u dobijenom). Ispis je bio tačan. Pao je exit
+code, zbog curenja. `diff` sam to ne pokazuje. Gledaj `EXIT:` i tekst
+`LeakSanitizer`. Agentov `run_tests` hvata i izlaz i exit code; ručni `diff`
+hvata samo fajl. Bez `--cap-add SYS_PTRACE` LeakSanitizer u jednokratnom
+`docker run` ne mora raditi kao u sandboxu, koji tu zastavicu uvijek doda.
 
 ## Primjer: seznam
 
@@ -243,9 +289,10 @@ docker run --rm --cap-add SYS_PTRACE --user "$(id -u):$(id -g)" \
 rm zadaci/zbroj/prog
 ```
 
-`--cap-add SYS_PTRACE` je bitan: bez njega LeakSanitizer u Dockeru ne radi kao u
-agentovom sandboxu. Kod bugova s memorijom `diff` često ne pokaže ništa jer je izlaz
-tačan; test tada pada samo zbog exit codea.
+`--cap-add SYS_PTRACE` je bitan: bez njega LeakSanitizer u jednokratnom
+`docker run` ne mora raditi kao u agentovom sandboxu. Ako sanitizer prekine
+program, `diff` može pokazati prazan izlaz iako je `printf` bio tačan. Odluka je
+`EXIT:`, ne sam `diff`. Detalj je iznad, u "Ručna provjera u Dockeru".
 
 ## Ograničenja
 
