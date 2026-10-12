@@ -88,20 +88,20 @@ izlaz se skraćuje da se ne troše tokeni.
 ## Docker sandbox
 
 ```mermaid
-flowchart LR
+flowchart TB
     G["Groq API"]
     subgraph Mac["Tvoj računar"]
         A["agent.py, tools.py<br/>čitanje i izmjena fajlova"]
         W["runs/.../work"]
     end
     subgraph K["Kontejner c-agent-sandbox"]
-        X["gcc, ./prog,<br/>valgrind, gdb"]
+        X["gcc, ./prog, valgrind, gdb"]
         V["/work"]
     end
-    A <-->|HTTPS| G
+    A -->|HTTPS| G
     A --> W
     A -->|docker exec| X
-    W <-.->|"mount -v, isti fajlovi"| V
+    W -.-|"mount -v, isti fajlovi"| V
 ```
 
 Python i model razmišljaju i mijenjaju fajlove; Docker samo izvršava. Pokvaren C kod
